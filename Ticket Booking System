@@ -1,0 +1,156 @@
+// server.js
+const express = require("express");
+const app = express();
+
+app.use(express.json());
+
+/**
+ * In-memory seat store
+ * keys are seat IDs (numbers) and values are objects with:
+ *  - status: "available" | "locked" | "booked"
+ *  - lockExpiresAt: timestamp in ms when lock expires (optional)
+ */
+const seats = {
+  1: { status: "available" },
+  2: { status: "available" },
+  3: { status: "available" },
+  4: { status: "available" },
+  5: { status: "available" },
+};
+
+// Keep references to timeouts so we can cancel them when confirming
+const lockTimeouts = {};
+
+// Lock duration in milliseconds (1 minute)
+const LOCK_DURATION_MS = 60 * 1000;
+
+/**
+ * Helper to release a lock for a seat (set it back to available)
+ */
+function releaseLock(seatId) {
+  const seat = seats[seatId];
+  if (!seat) return;
+  // Only release if it's still locked (could have been booked)
+  if (seat.status === "locked") {
+    seat.status = "available";
+    delete seat.lockExpiresAt;
+  }
+  // Clear stored timeout ref if present
+  if (lockTimeouts[seatId]) {
+    clearTimeout(lockTimeouts[seatId]);
+    delete lockTimeouts[seatId];
+  }
+}
+
+/**
+ * GET /seats
+ * Return the current status of all seats.
+ * Format matches screenshots: an object keyed by seat id (string) with status objects.
+ */
+app.get("/seats", (req, res) => {
+  // Build response as object with string keys
+  const resObj = {};
+  Object.keys(seats).forEach((id) => {
+    resObj[id] = { status: seats[id].status };
+  });
+  res.json(resObj);
+});
+
+/**
+ * POST /lock/:id
+ * Attempt to lock a seat for the caller. Lock lasts for 1 minute.
+ */
+app.post("/lock/:id", (req, res) => {
+  const id = req.params.id;
+  const seat = seats[id];
+
+  if (!seat) {
+    return res.status(404).json({ message: `Seat ${id} does not exist` });
+  }
+
+  // If seat is available, lock it
+  if (seat.status === "available") {
+    seat.status = "locked";
+    seat.lockExpiresAt = Date.now() + LOCK_DURATION_MS;
+
+    // If a previous timeout exists (shouldn't), clear it
+    if (lockTimeouts[id]) {
+      clearTimeout(lockTimeouts[id]);
+      delete lockTimeouts[id];
+    }
+
+    // Set timeout to auto-release the lock after LOCK_DURATION_MS
+    lockTimeouts[id] = setTimeout(() => {
+      releaseLock(id);
+    }, LOCK_DURATION_MS);
+
+    return res.status(200).json({
+      message: `Seat ${id} locked successfully. Confirm within 1 minute.`,
+    });
+  }
+
+  // If it's already locked or booked, cannot lock
+  return res.status(400).json({ message: "Seat not available for locking" });
+});
+
+/**
+ * POST /confirm/:id
+ * Confirm a previously locked seat. Only succeeds if seat is currently locked.
+ */
+app.post("/confirm/:id", (req, res) => {
+  const id = req.params.id;
+  const seat = seats[id];
+
+  if (!seat) {
+    return res.status(404).json({ message: `Seat ${id} does not exist` });
+  }
+
+  // Only locked seats can be confirmed (booked)
+  if (seat.status === "locked") {
+    // Clear timeout and mark as booked
+    if (lockTimeouts[id]) {
+      clearTimeout(lockTimeouts[id]);
+      delete lockTimeouts[id];
+    }
+    delete seat.lockExpiresAt;
+    seat.status = "booked";
+
+    return res.status(200).json({ message: `Seat ${id} booked successfully!` });
+  }
+
+  // If it's not locked, cannot confirm
+  return res
+    .status(400)
+    .json({ message: "Seat is not locked and cannot be booked" });
+});
+
+/**
+ * Optional: endpoint to reset seats (handy for testing)
+ * POST /reset
+ * Body (optional): { seatIds: [1,2,3] } - resets only given seats; if omitted resets all
+ */
+app.post("/reset", (req, res) => {
+  const { seatIds } = req.body || {};
+  const idsToReset = Array.isArray(seatIds)
+    ? seatIds.map(String)
+    : Object.keys(seats);
+
+  idsToReset.forEach((id) => {
+    // cancel any timeouts
+    if (lockTimeouts[id]) {
+      clearTimeout(lockTimeouts[id]);
+      delete lockTimeouts[id];
+    }
+    if (seats[id]) {
+      seats[id].status = "available";
+      delete seats[id].lockExpiresAt;
+    }
+  });
+
+  res.json({ message: "Seats reset", seats: idsToReset });
+});
+
+const PORT = process.env.PORT || 3000;
+app.listen(PORT, () => {
+  console.log(`Server running at http://localhost:${PORT}`);
+});
